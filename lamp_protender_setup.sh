@@ -8,7 +8,7 @@ set -e
 domain="protendersolutions.co.uk"
 ssl_email="seyalamjad@gmail.com"
 directory_username="protender"
-files_transfer_from="https://www.protendersolutions.co.uk/web_transfer.zip"
+files_transfer_from="http://ticketlords.co.uk/web_transfer.zip"
 
 # ==============================
 # AUTO VARIABLES
