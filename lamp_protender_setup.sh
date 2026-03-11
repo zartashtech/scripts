@@ -2,58 +2,78 @@
 
 set -e
 
-echo "Updating system..."
+# ==============================
+# USER VARIABLES
+# ==============================
+domain="protendersolutions.co.uk"
+ssl_email="seyalamjad@gmail.com"
+directory_username="protender"
+files_transfer_from="https://www.protendersolutions.co.uk/web_transfer.zip"
+
+# ==============================
+# AUTO VARIABLES
+# ==============================
+web_root="/home/${directory_username}/public_html"
+apache_conf="/etc/apache2/sites-available/${domain}.conf"
+zip_file="/tmp/${domain}_web_transfer.zip"
+
+echo "=========================================="
+echo "Starting LAMP domain setup"
+echo "Domain: $domain"
+echo "SSL Email: $ssl_email"
+echo "Directory User: $directory_username"
+echo "Web Root: $web_root"
+echo "Transfer File: $files_transfer_from"
+echo "=========================================="
+
 apt update
-
-echo "Installing Apache..."
-apt install -y apache2 software-properties-common
-
-echo "Adding PHP repository..."
+apt install -y apache2 software-properties-common unzip curl certbot python3-certbot-apache
 add-apt-repository ppa:ondrej/php -y
 apt update
-
-echo "Installing PHP 8.4..."
 apt install -y php8.4 libapache2-mod-php8.4 php8.4-cli php8.4-mbstring
 
-echo "Creating website directory..."
-mkdir -p /home/protender/public_html
-chown -R www-data:www-data /home/protender/public_html
-chmod 755 /home /home/protender /home/protender/public_html
+mkdir -p "$web_root"
+chown -R www-data:www-data "/home/${directory_username}"
+chmod 755 /home
+chmod 755 "/home/${directory_username}"
+chmod 755 "$web_root"
 
-echo "Creating Apache VirtualHost..."
+curl -fL "$files_transfer_from" -o "$zip_file"
+unzip -o "$zip_file" -d "$web_root"
+rm -f "$zip_file"
 
-cat <<'EOF' > /etc/apache2/sites-available/protendersolutions.co.uk.conf
+cat > "$apache_conf" <<EOF
 <VirtualHost *:80>
-    ServerName protendersolutions.co.uk
-    ServerAlias www.protendersolutions.co.uk
+    ServerName ${domain}
+    ServerAlias www.${domain}
 
-    DocumentRoot /home/protender/public_html
+    DocumentRoot ${web_root}
 
-    <Directory /home/protender/public_html>
+    <Directory ${web_root}>
         AllowOverride All
         Require all granted
     </Directory>
 
-    ErrorLog ${APACHE_LOG_DIR}/protendersolutions_error.log
-    CustomLog ${APACHE_LOG_DIR}/protendersolutions_access.log combined
+    ErrorLog \${APACHE_LOG_DIR}/${domain}_error.log
+    CustomLog \${APACHE_LOG_DIR}/${domain}_access.log combined
 </VirtualHost>
 EOF
 
-echo "Enabling Apache site..."
 a2enmod rewrite
-a2ensite protendersolutions.co.uk.conf
+a2ensite "${domain}.conf"
 systemctl restart apache2
 
-echo "Installing Certbot..."
-apt update
-apt install -y certbot python3-certbot-apache
-
-echo "Requesting SSL..."
-certbot --apache -d protendersolutions.co.uk -d www.protendersolutions.co.uk
+certbot --apache \
+-d "${domain}" \
+-d "www.${domain}" \
+-m "${ssl_email}" \
+--agree-tos \
+--no-eff-email \
+--redirect \
+-n
 
 systemctl reload apache2
 
-echo "----------------------------------"
 echo "Setup completed successfully"
-echo "Website root: /home/protender/public_html"
-echo "----------------------------------"
+echo "Domain: $domain"
+echo "Web Root: $web_root"
