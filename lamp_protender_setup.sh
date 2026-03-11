@@ -32,8 +32,10 @@ add-apt-repository ppa:ondrej/php -y
 apt update
 apt install -y php8.4 libapache2-mod-php8.4 php8.4-cli php8.4-mbstring
 
+mkdir -p "/home/${directory_username}"
 mkdir -p "$web_root"
-chown -R www-data:www-data "/home/${directory_username}"
+
+chown -R www-data:www-data "$web_root"
 chmod 755 /home
 chmod 755 "/home/${directory_username}"
 chmod 755 "$web_root"
@@ -41,6 +43,8 @@ chmod 755 "$web_root"
 curl -fL "$files_transfer_from" -o "$zip_file"
 unzip -o "$zip_file" -d "$web_root"
 rm -f "$zip_file"
+
+chown -R www-data:www-data "$web_root"
 
 cat > "$apache_conf" <<EOF
 <VirtualHost *:80>
@@ -61,6 +65,7 @@ EOF
 
 a2enmod rewrite
 a2ensite "${domain}.conf"
+a2dissite 000-default.conf || true
 systemctl restart apache2
 
 certbot --apache \
