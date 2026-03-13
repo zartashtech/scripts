@@ -5,26 +5,36 @@
 #
 # Usage (on the server, as root):
 #   curl -sSL https://your-public-url/github_setup.sh -o github_setup.sh && sudo bash github_setup.sh
-# Or: wget -q -O - https://... | sudo bash
-#
-# Override defaults with env: GITHUB_USER=myorg REPO_NAME=myrepo sudo bash github_setup.sh
+# Script will ask for GitHub username and repository name (or set GITHUB_USER and REPO_NAME in env).
 
 set -euo pipefail
 
-GITHUB_USER="${GITHUB_USER:-zartashtech}"
-REPO_NAME="${REPO_NAME:-monitoring_stack}"
+echo "=============================================="
+echo "GitHub setup (standalone – no repo needed)"
+echo "=============================================="
+echo ""
+
+if [[ -z "${GITHUB_USER:-}" ]]; then
+  read -rp "GitHub username or organization: " GITHUB_USER
+  GITHUB_USER="$(echo "${GITHUB_USER}" | tr -d '[:space:]')"
+fi
+if [[ -z "${REPO_NAME:-}" ]]; then
+  read -rp "Repository name: " REPO_NAME
+  REPO_NAME="$(echo "${REPO_NAME}" | tr -d '[:space:]')"
+fi
+
+if [[ -z "${GITHUB_USER}" || -z "${REPO_NAME}" ]]; then
+  echo "Error: GitHub username and repository name are required."
+  exit 1
+fi
+
 SSH_KEY_NAME="${REPO_NAME}_deploy"
 SSH_DIR="${SSH_DIR:-/root/.ssh}"
 SSH_KEY_PATH="${SSH_DIR}/${SSH_KEY_NAME}"
 SSH_CONFIG="${SSH_DIR}/config"
 
-echo "=============================================="
-echo "GitHub setup (standalone – no repo needed)"
-echo "=============================================="
-echo "GitHub user : ${GITHUB_USER}"
-echo "Repo        : ${REPO_NAME}"
-echo "Key path    : ${SSH_KEY_PATH}"
-echo "=============================================="
+echo ""
+echo "Key path: ${SSH_KEY_PATH}"
 echo ""
 
 # Git
