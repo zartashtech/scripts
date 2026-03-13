@@ -14,16 +14,18 @@ echo "GitHub setup (standalone - no repo needed)"
 echo "=============================================="
 echo ""
 
-if [[ -z "${GITHUB_USER:-}" ]]; then
-  read -r -p "GitHub username or organization: " GITHUB_USER
+if [ -z "${GITHUB_USER:-}" ]; then
+  echo -n "GitHub username or organization: "
+  read -r GITHUB_USER
   GITHUB_USER="$(echo "${GITHUB_USER}" | tr -d '[:space:]')"
 fi
-if [[ -z "${REPO_NAME:-}" ]]; then
-  read -r -p "Repository name: " REPO_NAME
+if [ -z "${REPO_NAME:-}" ]; then
+  echo -n "Repository name: "
+  read -r REPO_NAME
   REPO_NAME="$(echo "${REPO_NAME}" | tr -d '[:space:]')"
 fi
 
-if [[ -z "${GITHUB_USER}" || -z "${REPO_NAME}" ]]; then
+if [ -z "${GITHUB_USER}" ] || [ -z "${REPO_NAME}" ]; then
   echo "Error: GitHub username and repository name are required."
   exit 1
 fi
@@ -38,7 +40,7 @@ echo "Key path: ${SSH_KEY_PATH}"
 echo ""
 
 # Git
-if ! command -v git &>/dev/null; then
+if ! command -v git >/dev/null 2>&1; then
   echo "=== [1] Installing Git ==="
   apt-get update -qq && apt-get install -y git
 else
@@ -49,7 +51,7 @@ mkdir -p "${SSH_DIR}"
 chmod 700 "${SSH_DIR}"
 
 # Create key if missing
-if [[ ! -f "${SSH_KEY_PATH}" ]]; then
+if [ ! -f "${SSH_KEY_PATH}" ]; then
   echo "=== [2] Creating SSH deploy key ==="
   ssh-keygen -t ed25519 -C "deploy-${REPO_NAME}" -f "${SSH_KEY_PATH}" -N ""
   chmod 600 "${SSH_KEY_PATH}"
@@ -67,7 +69,7 @@ fi
 
 # SSH config for github.com
 echo "=== [3] SSH config for github.com ==="
-if [[ ! -f "${SSH_CONFIG}" ]]; then
+if [ ! -f "${SSH_CONFIG}" ]; then
   touch "${SSH_CONFIG}"
   chmod 600 "${SSH_CONFIG}"
 fi
