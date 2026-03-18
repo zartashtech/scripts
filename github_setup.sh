@@ -173,6 +173,7 @@ require_root
 echo "=== [1] Checking dependencies ==="
 install_pkg_if_missing curl curl
 install_pkg_if_missing git git
+install_pkg_if_missing make build-essential
 if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
   apt-get update -qq
   apt-get install -y openssh-client
