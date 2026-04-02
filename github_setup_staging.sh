@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 # github_setup_staging.sh
 #
-# Lives in the **public** repo: https://github.com/zartashtech/lamp_mutisite
-# Run on the staging server (as root) to create a deploy key + SSH host alias per **private** GitHub repo.
+# SOURCE OF TRUTH: edit this file in **private** repo **staging_lamp_setup** at github-public/github_setup_staging.sh
+# PUBLISHING: manually copy-paste this entire file into **public** repo **scripts** as github_setup_staging.sh (repo root, main).
+#   https://github.com/zartashtech/scripts/blob/main/github_setup_staging.sh
+# Servers **curl** that public file for first-time SSH bootstrap (see doc/install.md §0). Public raw URL:
+#   https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup_staging.sh
 #
-# You normally run it **twice** — once for each private repo:
-#   1) staging_lamp_setup   — private repo where LAMP / server setup (or related) lives
-#   2) staging_websites     — private repo where website application code lives (point `github_repo_ssh_url` in settings.conf at this one)
+# Run on the staging server (as root). Each run creates one deploy key + SSH host alias for a **private**
+# GitHub repository, so the server can `git` clone/fetch that repo.
 #
-# Same flow as before: deploy key, add in GitHub → Deploy keys (read-only), then re-run or continue.
+# Typical staging pair (run the script once per repo — two runs total):
+#   1) staging_lamp_setup — this tooling repo (for git pull on the server; use a deploy key if the repo is private)
+#   2) staging_websites   — website application code (deploy.sh / github_repo_ssh_url → this repo only)
 #
-# Usage:
+# Flow: create deploy key → add in GitHub → Settings → Deploy keys (read-only) → re-run or continue.
+#
+# Usage (preferred — after curl saves this file, e.g. as github_setup_staging.sh):
+#   sudo bash github_setup_staging.sh <github_user_or_org> <repo_name>
+#
+# Same script from a private staging_lamp_setup clone:
 #   sudo bash github-public/github_setup_staging.sh <github_user_or_org> <repo_name>
 #
 # Examples (org zartashtech):
-#   sudo bash github-public/github_setup_staging.sh zartashtech staging_lamp_setup
-#   sudo bash github-public/github_setup_staging.sh zartashtech staging_websites
+#   sudo bash github_setup_staging.sh zartashtech staging_lamp_setup
+#   sudo bash github_setup_staging.sh zartashtech staging_websites
 #
-# Or:
-#   sudo GITHUB_USER="zartashtech" REPO_NAME="staging_websites" bash github-public/github_setup_staging.sh
+# Or with env vars:
+#   sudo GITHUB_USER="zartashtech" REPO_NAME="staging_websites" bash github_setup_staging.sh
 
 set -euo pipefail
 
@@ -34,14 +43,18 @@ if [ -z "${GITHUB_USER}" ] || [ -z "${REPO_NAME}" ]; then
   echo "Error: GitHub username/org and repository name are required."
   echo ""
   echo "Usage:"
+  echo "  sudo bash github_setup_staging.sh <github_user_or_org> <repo_name>"
+  echo "  (file from: https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup_staging.sh)"
+  echo ""
+  echo "  or from staging_lamp_setup clone:"
   echo "  sudo bash github-public/github_setup_staging.sh <github_user_or_org> <repo_name>"
   echo ""
-  echo "Typical (two private repos):"
-  echo "  sudo bash github-public/github_setup_staging.sh zartashtech staging_lamp_setup"
-  echo "  sudo bash github-public/github_setup_staging.sh zartashtech staging_websites"
+  echo "Typical (staging_lamp_setup + staging_websites):"
+  echo "  sudo bash github_setup_staging.sh zartashtech staging_lamp_setup"
+  echo "  sudo bash github_setup_staging.sh zartashtech staging_websites"
   echo ""
   echo "Or:"
-  echo "  sudo GITHUB_USER=\"youruser\" REPO_NAME=\"yourrepo\" bash github-public/github_setup_staging.sh"
+  echo "  sudo GITHUB_USER=\"youruser\" REPO_NAME=\"yourrepo\" bash github_setup_staging.sh"
   exit 1
 fi
 
