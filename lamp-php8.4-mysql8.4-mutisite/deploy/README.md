@@ -10,7 +10,9 @@ You maintain `deploy/config/site_inventory.ini`. Running the deploy script will:
 
 No Ansible, no Docker, no Python.
 
-**Step-by-step command list:** see [`doc/install.md`](../doc/install.md) in the repo root.
+**Step-by-step command list:** see [`doc/install.md`](../doc/install.md) in the project root.
+
+**Upstream layout:** this project’s Git remote is **`zartashtech/scripts`**; these files live in **`lamp-php8.4-mysql8.4-mutisite/`** inside that repo. Clone the parent repo, then `cd lamp-php8.4-mysql8.4-mutisite` (or your chosen path) so `deploy/` is your working directory root when running scripts.
 
 ---
 

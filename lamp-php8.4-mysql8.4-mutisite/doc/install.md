@@ -1,20 +1,29 @@
 # Deployment install guide (step-by-step)
 
-Target: **Ubuntu 24.04** (or similar) staging server. Run commands **as root** via `sudo` where shown. Paths assume the **deployment repo** is checked out at a directory you choose; replace `/opt/deploy/lamp-stack` with your actual path.
+Target: **Ubuntu 24.04** (or similar) staging server. Run commands **as root** via `sudo` where shown.
+
+**GitHub layout:** this stack lives under **[zartashtech/scripts](https://github.com/zartashtech/scripts)** in folder **`lamp-php8.4-mysql8.4-mutisite/`** (i.e. `zartashtech/scripts/lamp-php8.4-mysql8.4-mutisite` in the tree). After cloning the repo, **always `cd` into that folder** before running any deploy script; all paths below use that as the project root (example: `/opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite`).
 
 ---
 
-## 0. Clone this deployment repository on the server
+## 0. Clone the repository on the server
 
 ```bash
 sudo mkdir -p /opt/deploy
 sudo chown "$USER:$USER" /opt/deploy
 cd /opt/deploy
-git clone <YOUR_URL_TO_THIS_DEPLOY_REPO> lamp-stack
-cd lamp-stack
+git clone git@github.com:zartashtech/scripts.git
+cd scripts/lamp-php8.4-mysql8.4-mutisite
 ```
 
-If you only copy files (no git remote), unpack into the same tree so `deploy/scripts/` and `deploy/config/` exist.
+Using HTTPS instead of SSH for the clone:
+
+```bash
+git clone https://github.com/zartashtech/scripts.git
+cd scripts/lamp-php8.4-mysql8.4-mutisite
+```
+
+If you only copy files (no git remote), unpack so this folder contains `deploy/scripts/` and `deploy/config/`.
 
 ---
 
@@ -23,7 +32,7 @@ If you only copy files (no git remote), unpack into the same tree so `deploy/scr
 The app code lives in a **separate** private repository. Configure SSH on the server:
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo ./github_setup.sh <github_org_or_user> <private_repo_name>
 ```
 
@@ -61,7 +70,7 @@ Notes:
 ## 3. One-time server bootstrap (Apache, PHP 8.4 FPM, MySQL 8.4)
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo bash deploy/scripts/server_bootstrap.sh
 ```
 
@@ -72,7 +81,7 @@ Sets non-interactive apt/dpkg behavior where applicable. Secure MySQL (`mysql_se
 ## 4. Provision Apache vhosts, docroots, SSL (Certbot) — one-time per inventory change
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo bash deploy/scripts/site_provision.sh
 ```
 
@@ -85,7 +94,7 @@ Re-run after adding sites or changing domains/SSL. With `purge_inactive=yes`, `d
 On **staging**:
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo bash deploy/scripts/ssh_db_bootstrap.sh
 ```
 
@@ -113,7 +122,7 @@ Re-run `ssh_db_bootstrap.sh` until all sources report success.
 ## 6. Create local databases, users, and import from sources
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo bash deploy/scripts/db_provision.sh
 ```
 
@@ -126,7 +135,7 @@ Imports use `mysqldump` over SSH and import into the **`db_name`** from the matc
 Full deploy (validate, optional purge, sync repo, rsync all `active=yes` sites):
 
 ```bash
-cd /opt/deploy/lamp-stack
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo bash deploy/scripts/deploy.sh
 ```
 
@@ -162,7 +171,7 @@ Then run `deploy.sh`. Repo fetch still runs; rsync uses dry-run (`-n`). Set back
 
 ## 10. Suggested first-time order (checklist)
 
-1. Clone deployment repo on server.
+1. Clone `zartashtech/scripts` and `cd` into `lamp-php8.4-mysql8.4-mutisite`.
 2. `github_setup.sh` + deploy key on GitHub + `github_repo_ssh_url` in `settings.conf`.
 3. Edit `site_inventory.ini`, `db_inventory.ini`, `settings.conf`.
 4. `server_bootstrap.sh`
