@@ -2,11 +2,15 @@
 
 Target: **Ubuntu 24.04** (or similar) staging server. Run commands **as root** via `sudo` where shown.
 
-**GitHub layout:** this stack lives under **[zartashtech/scripts](https://github.com/zartashtech/scripts)** in folder **`lamp-php8.4-mysql8.4-mutisite/`** (i.e. `zartashtech/scripts/lamp-php8.4-mysql8.4-mutisite` in the tree). After cloning the repo, **always `cd` into that folder** before running any deploy script; all paths below use that as the project root (example: `/opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite`).
+**Repository layout (your case):**
+
+- **Main Git repo:** [`zartashtech/scripts`](https://github.com/zartashtech/scripts) — this is the only thing you clone; it may contain many other folders beside the LAMP stack.
+- **This project:** **`lamp-php8.4-mysql8.4-mutisite/`** is a **subfolder inside that repo** (path on GitHub: `scripts` → `lamp-php8.4-mysql8.4-mutisite/`). It is **not** the repository root.
+- **On the server:** `git clone` creates a directory named `scripts` (same as the repo name). Always **`cd scripts/lamp-php8.4-mysql8.4-mutisite`** before running `deploy.sh`, `server_bootstrap.sh`, etc. Example project root: `/opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite`.
 
 ---
 
-## 0. Clone the repository on the server
+## 0. Clone the deployment project on the server
 
 ```bash
 sudo mkdir -p /opt/deploy
@@ -23,28 +27,57 @@ git clone https://github.com/zartashtech/scripts.git
 cd scripts/lamp-php8.4-mysql8.4-mutisite
 ```
 
+You need this full tree for `deploy/scripts/`, `deploy/config/`, and updates via `git pull`. A single downloaded script is not enough for Apache/PHP/MySQL provisioning or `deploy.sh`.
+
 If you only copy files (no git remote), unpack so this folder contains `deploy/scripts/` and `deploy/config/`.
 
 ---
 
-## 1. GitHub SSH access for the **private websites** monorepo
+## 1. GitHub SSH access for the **private websites** repository
 
-The app code lives in a **separate** private repository. Configure SSH on the server:
+The **application** code lives in a **separate** GitHub repo (example: `zartashtech/monitoring_stack`). The server needs a deploy key (or other SSH auth) to `git fetch` that repo.
+
+You can do this in either order: run `github_setup.sh` **before** section 0 (via `curl` below) or **after** you clone, from inside `lamp-php8.4-mysql8.4-mutisite`.
+
+### Option A — Download only `github_setup.sh` (no clone yet)
+
+Useful when you want SSH working first with minimal files. Raw URL must match where the script lives on the `main` branch:
+
+- **As shipped in this repo layout:** under the LAMP folder:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zartashtech/scripts/main/lamp-php8.4-mysql8.4-mutisite/github_setup.sh -o github_setup.sh
+sudo bash github_setup.sh zartashtech monitoring_stack
+```
+
+- **If you also keep a copy at the root of `scripts`**, you can use the shorter URL instead:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup.sh -o github_setup.sh
+sudo bash github_setup.sh zartashtech monitoring_stack
+```
+
+Replace `monitoring_stack` with the **private repo name** that holds your sites (the one `github_repo_ssh_url` in `settings.conf` will point at).
+
+When the script prints the **public** key, add it in GitHub: **Repo → Settings → Deploy keys → Add deploy key** (read-only). Then continue the script when prompted so SSH is tested.
+
+### Option B — From a full clone (same script)
 
 ```bash
 cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
-sudo ./github_setup.sh <github_org_or_user> <private_repo_name>
+sudo ./github_setup.sh zartashtech monitoring_stack
 ```
 
-Copy the printed **public** key into GitHub: **Repository → Settings → Deploy keys** (read-only is enough).
+Use the same deploy-key step as in option A.
 
-Set `deploy/config/settings.conf`:
+### `settings.conf`
 
-- `github_repo_ssh_url` — must match the SSH URL (including any host alias from `github_setup.sh`, e.g. `git@github-mysite:org/repo.git`).
+Set `github_repo_ssh_url` to the SSH URL that matches what `github_setup.sh` configures (host alias or `git@github.com:...`).
 
-Test (as root, if deploy runs as root):
+Test (as root, if deploy runs as root), from the LAMP project root:
 
 ```bash
+cd /opt/deploy/scripts/lamp-php8.4-mysql8.4-mutisite
 sudo git ls-remote "$(grep '^github_repo_ssh_url=' deploy/config/settings.conf | cut -d= -f2- | tr -d '"')"
 ```
 
@@ -171,13 +204,14 @@ Then run `deploy.sh`. Repo fetch still runs; rsync uses dry-run (`-n`). Set back
 
 ## 10. Suggested first-time order (checklist)
 
-1. Clone `zartashtech/scripts` and `cd` into `lamp-php8.4-mysql8.4-mutisite`.
-2. `github_setup.sh` + deploy key on GitHub + `github_repo_ssh_url` in `settings.conf`.
-3. Edit `site_inventory.ini`, `db_inventory.ini`, `settings.conf`.
-4. `server_bootstrap.sh`
-5. `site_provision.sh`
-6. `ssh_db_bootstrap.sh` + `remote_ssh_connect_provision.sh` on each source + source `.my.cnf` for mysqldump.
-7. `db_provision.sh`
-8. `deploy.sh`
+1. (Optional) `curl` + `github_setup.sh` for the **private sites** repo, deploy key, finish the script — or do this after clone (section 1).
+2. Clone `zartashtech/scripts` and `cd` into `lamp-php8.4-mysql8.4-mutisite`.
+3. If you skipped step 1: run `github_setup.sh` here; set `github_repo_ssh_url` in `settings.conf`.
+4. Edit `site_inventory.ini`, `db_inventory.ini`, `settings.conf` (if not already).
+5. `server_bootstrap.sh`
+6. `site_provision.sh`
+7. `ssh_db_bootstrap.sh` + `remote_ssh_connect_provision.sh` on each source + source `.my.cnf` for mysqldump.
+8. `db_provision.sh`
+9. `deploy.sh`
 
 For details and edge cases, see `deploy/README.md`.

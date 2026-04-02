@@ -12,7 +12,7 @@ No Ansible, no Docker, no Python.
 
 **Step-by-step command list:** see [`doc/install.md`](../doc/install.md) in the project root.
 
-**Upstream layout:** this project’s Git remote is **`zartashtech/scripts`**; these files live in **`lamp-php8.4-mysql8.4-mutisite/`** inside that repo. Clone the parent repo, then `cd lamp-php8.4-mysql8.4-mutisite` (or your chosen path) so `deploy/` is your working directory root when running scripts.
+**Upstream layout:** the **main** repository is **`zartashtech/scripts`**. This deployment stack is **only** the subfolder **`lamp-php8.4-mysql8.4-mutisite/`** inside it (not the repo root). Clone `scripts`, then open **`scripts/lamp-php8.4-mysql8.4-mutisite`** on disk so `deploy/` is your working directory when you run the scripts.
 
 ---
 
