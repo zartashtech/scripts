@@ -10,7 +10,7 @@ You maintain `deploy/config/site_inventory.ini`. Running the deploy script will:
 
 No Ansible, no Docker, no Python.
 
-**Step-by-step command list:** see [`doc/install`](../doc/install) in the repo root.
+**Step-by-step command list:** see [`doc/install.md`](../doc/install.md) in the repo root.
 
 ---
 
