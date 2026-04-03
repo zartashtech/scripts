@@ -2,9 +2,9 @@
 # github_setup_staging.sh
 #
 # SOURCE OF TRUTH: edit this file in **private** repo **staging_lamp_setup** at github-public/github_setup_staging.sh
-# PUBLISHING: manually copy-paste this entire file into **public** repo **scripts** as github_setup_staging.sh (repo root, main).
+# PUBLISHING: manually copy-paste this entire file into **public** repo **scripts** as github_setup_staging.sh (repo root, main). This is the **only** script from this repo intended for that public listing; dump helpers are fetched from staging over SSH.
 #   https://github.com/zartashtech/scripts/blob/main/github_setup_staging.sh
-# Servers **curl** that public file for first-time SSH bootstrap (see doc/install.md §0). Public raw URL:
+# Servers **curl** that public file for deploy-key bootstrap (see docs/installation_guide_user.md). Public raw URL:
 #   https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup_staging.sh
 #
 # Run on the staging server (as root). Each run creates one deploy key + SSH host alias for a **private**
@@ -16,18 +16,136 @@
 #
 # Flow: create deploy key → add in GitHub → Settings → Deploy keys (read-only) → re-run or continue.
 #
-# Usage (preferred — after curl saves this file, e.g. as github_setup_staging.sh):
+# Usage (after curl from public scripts repo):
 #   sudo bash github_setup_staging.sh <github_user_or_org> <repo_name>
-#
-# Same script from a private staging_lamp_setup clone:
-#   sudo bash github-public/github_setup_staging.sh <github_user_or_org> <repo_name>
 #
 # Examples (org zartashtech):
 #   sudo bash github_setup_staging.sh zartashtech staging_lamp_setup
 #   sudo bash github_setup_staging.sh zartashtech staging_websites
 #
-# Or with env vars:
-#   sudo GITHUB_USER="zartashtech" REPO_NAME="staging_websites" bash github_setup_staging.sh
+# MySQL source host — fetch **scripts/db_scripts/inventory_sql_dump_to_staging.sh** from the staging tooling clone (scp), run it, delete temp copy:
+#   sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@staging.example.com [--repo-path /opt/deploy/staging_lamp_setup] [--ssh-key ~/.ssh/remote_ssh] [--ssh-port 22] [-- further args passed to the dump script ...]
+#
+# Public **scripts** repo should ship **only** this file; the dump script lives under scripts/db_scripts/ on staging (not published separately).
+
+STAGING_TOOLING_REPO_DEFAULT="${STAGING_TOOLING_REPO_DEFAULT:-/opt/deploy/staging_lamp_setup}"
+
+ssh_strict_host_opt() {
+  if [ "${SSH_STRICT_HOST_KEYS:-}" = "yes" ]; then
+    printf '%s' "StrictHostKeyChecking=yes"
+  else
+    printf '%s' "StrictHostKeyChecking=accept-new"
+  fi
+}
+
+# scp one file from staging → temp; run it with same argv tail; always remove temp (trap).
+sql_dump_run_fetched_from_staging() {
+  set -euo pipefail
+  local remote_rel_path="$1"
+  shift
+  local all_pass=("$@")
+
+  local REPO_PATH="${REPO_PATH:-${STAGING_TOOLING_REPO_DEFAULT}}"
+  local SSH_KEY="${SSH_KEY:-${HOME}/.ssh/remote_ssh}"
+  local STAGING_SSH_CLI=""
+  local SSH_PORT_OVERRIDE=""
+  local i=0
+
+  while [ "$i" -lt "${#all_pass[@]}" ]; do
+    case "${all_pass[i]}" in
+      --repo-path)
+        REPO_PATH="${all_pass[i + 1]:-}"
+        i=$((i + 2))
+        continue
+        ;;
+      --ssh-key)
+        SSH_KEY="${all_pass[i + 1]:-}"
+        i=$((i + 2))
+        continue
+        ;;
+      --ssh-port)
+        SSH_PORT_OVERRIDE="${all_pass[i + 1]:-}"
+        i=$((i + 2))
+        continue
+        ;;
+      --staging)
+        STAGING_SSH_CLI="${all_pass[i + 1]:-}"
+        i=$((i + 2))
+        continue
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: sql-dump modes require root (sudo)." >&2
+    exit 1
+  fi
+  if [ -z "${STAGING_SSH_CLI}" ]; then
+    echo "Error: --staging USER@HOST is required (staging server that has the tooling repo clone)." >&2
+    exit 1
+  fi
+  if [ ! -f "${SSH_KEY}" ]; then
+    echo "Error: SSH private key not found: ${SSH_KEY}" >&2
+    echo "On staging, run scripts/remote_ssh_connect_provision.sh and authorize this host's public key." >&2
+    exit 1
+  fi
+
+  local sp="${SSH_PORT_OVERRIDE:-22}"
+  case "${sp}" in
+    *[!0-9]*)
+      echo "Error: invalid --ssh-port: ${sp}" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${sp}" -lt 1 ] || [ "${sp}" -gt 65535 ]; then
+    echo "Error: SSH port out of range: ${sp}" >&2
+    exit 1
+  fi
+
+  local remote_full="${REPO_PATH}/${remote_rel_path}"
+  case "${remote_full}" in
+    *..*)
+      echo "Error: unsafe path (..) in remote path: ${remote_full}" >&2
+      exit 1
+      ;;
+  esac
+
+  if ! command -v scp >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y --no-install-recommends openssh-client
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  chmod 600 "${tmp}"
+  cleanup_tmp() {
+    rm -f -- "${tmp}"
+  }
+  trap cleanup_tmp EXIT
+
+  echo "=== [bootstrap] Copying ${remote_rel_path} from ${STAGING_SSH_CLI} (temporary file, removed after run) ==="
+  if ! scp -i "${SSH_KEY}" -P "${sp}" \
+    -o BatchMode=yes -o ConnectTimeout=30 -o "$(ssh_strict_host_opt)" \
+    -o IdentitiesOnly=yes \
+    -- "${STAGING_SSH_CLI}:${remote_full}" "${tmp}"; then
+    echo "Error: scp failed for ${STAGING_SSH_CLI}:${remote_full}" >&2
+    exit 1
+  fi
+
+  local ec=0
+  bash "${tmp}" "${all_pass[@]}" || ec=$?
+  cleanup_tmp
+  trap - EXIT
+  exit "${ec}"
+}
+
+case "${1:-}" in
+  sql-dump-to-staging)
+    shift
+    sql_dump_run_fetched_from_staging "scripts/db_scripts/inventory_sql_dump_to_staging.sh" "$@"
+    ;;
+esac
 
 set -euo pipefail
 
@@ -44,17 +162,16 @@ if [ -z "${GITHUB_USER}" ] || [ -z "${REPO_NAME}" ]; then
   echo ""
   echo "Usage:"
   echo "  sudo bash github_setup_staging.sh <github_user_or_org> <repo_name>"
-  echo "  (file from: https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup_staging.sh)"
   echo ""
-  echo "  or from staging_lamp_setup clone:"
-  echo "  sudo bash github-public/github_setup_staging.sh <github_user_or_org> <repo_name>"
+  echo "Get this file:"
+  echo "  curl -sSL https://raw.githubusercontent.com/zartashtech/scripts/main/github_setup_staging.sh -o github_setup_staging.sh"
   echo ""
-  echo "Typical (staging_lamp_setup + staging_websites):"
+  echo "Typical (deploy keys for staging_lamp_setup + staging_websites):"
   echo "  sudo bash github_setup_staging.sh zartashtech staging_lamp_setup"
   echo "  sudo bash github_setup_staging.sh zartashtech staging_websites"
   echo ""
-  echo "Or:"
-  echo "  sudo GITHUB_USER=\"youruser\" REPO_NAME=\"yourrepo\" bash github_setup_staging.sh"
+  echo "MySQL source host — fetch dump helper from staging clone (temp file), run, delete:"
+  echo "  sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@STAGING [... pass-through flags for inventory_sql_dump_to_staging.sh ...]"
   exit 1
 fi
 
@@ -108,7 +225,7 @@ install_pkg_if_missing() {
 
   if ! command -v "${cmd}" >/dev/null 2>&1; then
     apt-get update -qq
-    apt-get install -y "${pkgs[@]}"
+    apt-get install -y --no-install-recommends "${pkgs[@]}"
   fi
 }
 
@@ -194,10 +311,9 @@ require_root
 echo "=== [1] Checking dependencies ==="
 install_pkg_if_missing curl curl
 install_pkg_if_missing git git
-install_pkg_if_missing make build-essential
 if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
   apt-get update -qq
-  apt-get install -y openssh-client
+  apt-get install -y --no-install-recommends openssh-client
 fi
 echo "Dependencies OK"
 echo ""
@@ -205,13 +321,17 @@ echo ""
 echo "=== [2] Lightweight GitHub validation ==="
 OWNER_URL="https://api.github.com/users/${GITHUB_USER}"
 OWNER_STATUS="$(api_status "${OWNER_URL}")"
+if [ "${OWNER_STATUS}" != "200" ]; then
+  OWNER_URL="https://api.github.com/orgs/${GITHUB_USER}"
+  OWNER_STATUS="$(api_status "${OWNER_URL}")"
+fi
 
 if [ "${OWNER_STATUS}" = "200" ]; then
   echo "Owner/user/org appears to exist."
 else
-  echo "Warning: could not confirm owner/user/org publicly."
-  echo "Checked: ${OWNER_URL}"
-  echo "Continuing anyway."
+  echo "Warning: could not confirm owner/user/org publicly via API."
+  echo "Checked users + orgs endpoints for: ${GITHUB_USER}"
+  echo "Continuing (normal for some networks or API limits)."
 fi
 
 REPO_URL="https://api.github.com/repos/${GITHUB_USER}/${REPO_NAME}"
@@ -265,6 +385,12 @@ fi
 
 if ssh_config_has_host "${HOST_ALIAS}"; then
   echo "SSH config entry already exists for ${HOST_ALIAS}"
+  if grep -A6 "^Host ${HOST_ALIAS}$" "${SSH_CONFIG}" 2>/dev/null | grep -q "IdentityFile ${SSH_KEY_PATH}"; then
+    :
+  else
+    echo "Warning: existing Host ${HOST_ALIAS} may use a different IdentityFile than ${SSH_KEY_PATH}."
+    echo "If git/ssh fails, remove that Host block from ${SSH_CONFIG} and re-run this script."
+  fi
 else
   add_ssh_config_block "${HOST_ALIAS}" "${SSH_KEY_PATH}"
   echo "Added SSH config entry for ${HOST_ALIAS}"
@@ -281,7 +407,8 @@ SSH_TEST_OUTPUT="$(ssh -o BatchMode=yes -T git@${HOST_ALIAS} 2>&1 || true)"
 echo "${SSH_TEST_OUTPUT}"
 echo ""
 
-if echo "${SSH_TEST_OUTPUT}" | grep -Eq "successfully authenticated|You've successfully authenticated"; then
+# GitHub SSH success messages vary slightly; keep patterns tight to avoid false positives.
+if echo "${SSH_TEST_OUTPUT}" | grep -Eiq "successfully authenticated|authenticated as deploy key|You've successfully authenticated"; then
   echo "SSH identity accepted by GitHub."
 else
   echo "SSH authentication failed."
