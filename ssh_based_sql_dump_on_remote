@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# ssh_based_sql_dump_on_remote.sh
+#
+# SOURCE OF TRUTH: **staging_lamp_setup** (private) `github-public/ssh_based_sql_dump_on_remote.sh`
+# PUBLISHING: copy into public repo **scripts** as `ssh_based_sql_dump_on_remote.sh` (repo root, `main`).
+#
+# Run on the machine that **has the MySQL data to export** (source DB server), as **root**:
+#   sudo bash ssh_based_sql_dump_on_remote.sh
+#
+# Flow: prompts for **staging (remote)** SSH host/port/user → ensures SSH key `~/.ssh/remote_ssh` →
+# ensures **/root/.dump.conf** on **source** (creates template + **nano** if missing/empty) →
+# same on **staging** when REMOTE_MYSQL_CNF is set → dump → upload → remote mysql import → remove dumps.
+#
+# MySQL does **not** read `.dump.conf` by itself; this script passes **--defaults-file=...**
+#
+# Optional env:
+#   DUMP_DIR_LOCAL=/opt/deploy/sql_dump
+#   DUMP_DIR_REMOTE=/opt/deploy/sql_dump
+#   SOURCE_MYSQL_CNF=/root/.dump.conf
+#   REMOTE_MYSQL_CNF=/root/.dump.conf   # set empty for plain `mysql` on staging
+
+set -u
+
+DUMP_DIR_LOCAL="${DUMP_DIR_LOCAL:-/opt/deploy/sql_dump}"
+DUMP_DIR_REMOTE="${DUMP_DIR_REMOTE:-/opt/deploy/sql_dump}"
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/remote_ssh}"
+SOURCE_MYSQL_CNF="${SOURCE_MYSQL_CNF:-/root/.dump.conf}"
+REMOTE_MYSQL_CNF="${REMOTE_MYSQL_CNF:-/root/.dump.conf}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+}
+
+dump_conf_template() {
+  printf '%s\n' '[client]' 'user=root' 'password=' 'host=127.0.0.1'
+}
+
+run_text_editor() {
+  local path="$1"
+  if command -v nano >/dev/null 2>&1; then
+    nano "${path}"
+  elif [ -n "${EDITOR:-}" ]; then
+    # shellcheck disable=SC2086
+    ${EDITOR} "${path}"
+  elif command -v vi >/dev/null 2>&1; then
+    vi "${path}"
+  else
+    die "install nano or set EDITOR (nano not found, vi not found)"
+  fi
+}
+
+ensure_local_dump_conf() {
+  local f="$1"
+  if [ -f "${f}" ] && [ -s "${f}" ]; then
+    echo "using existing ${f} on this host"
+    return 0
+  fi
+
+  echo ""
+  echo "=== ${f} is missing or empty on this host ==="
+  echo "creating a template — set MySQL user, password, host for the DATABASE YOU ARE DUMPING; save and exit."
+  umask 077
+  dump_conf_template >"${f}"
+  chmod 600 "${f}"
+  run_text_editor "${f}"
+  [ -f "${f}" ] || die "${f} missing after editor"
+  [ -s "${f}" ] || die "${f} is still empty — add [client] credentials and re-run"
+}
+
+ensure_remote_dump_conf() {
+  local rf="$1"
+  local sq
+  sq="$(printf '%q' "${rf}")"
+
+  if ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" "test -f ${sq} && test -s ${sq}" 2>/dev/null; then
+    echo "using existing ${rf} on ${REMOTE_HOST}"
+    return 0
+  fi
+
+  echo ""
+  echo "=== ${rf} is missing or empty on ${REMOTE_HOST} ==="
+  echo "creating template — set MySQL user/password/host for IMPORT on staging (often root); save and exit nano."
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" \
+    "umask 077; printf '%s\\n' '[client]' 'user=root' 'password=' 'host=127.0.0.1' > ${sq} && chmod 600 ${sq}" \
+    || die "could not create ${rf} on remote"
+
+  ssh -t -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" \
+    "nano ${sq}" \
+    || die "nano on remote failed (install nano on ${REMOTE_HOST} or edit ${rf} manually)"
+
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" "test -f ${sq} && test -s ${sq}" \
+    || die "${rf} on ${REMOTE_HOST} is still missing or empty"
+}
+
+prompt_nonempty() {
+  local msg="$1"
+  local val=""
+  while [ -z "${val}" ]; do
+    read -r -p "${msg}" val || exit 1
+    val="$(echo "${val}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  done
+  printf '%s' "${val}"
+}
+
+prompt_optional_default() {
+  local msg="$1" default="$2" val
+  read -r -p "${msg} [${default}]: " val || exit 1
+  val="$(echo "${val}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ -z "${val}" ]; then
+    printf '%s' "${default}"
+  else
+    printf '%s' "${val}"
+  fi
+}
+
+ssh_test() {
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o BatchMode=yes -o ConnectTimeout=15 \
+    -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" >/dev/null 2>&1
+}
+
+ensure_remote_ssh_key() {
+  local pub="${SSH_KEY}.pub"
+  mkdir -p -- "$(dirname "${SSH_KEY}")"
+  if [ ! -f "${SSH_KEY}" ] || [ ! -f "${pub}" ]; then
+    echo "creating SSH key pair: ${SSH_KEY}"
+    ssh-keygen -t ed25519 -f "${SSH_KEY}" -N "" -C "remote_ssh staging push $(date +%Y%m%d)"
+    chmod 600 "${SSH_KEY}"
+    chmod 644 "${pub}"
+  fi
+  echo ""
+  echo "=== add this public key to ${REMOTE_USER}@${REMOTE_HOST} (${REMOTE_PORT}) authorized_keys ==="
+  echo ""
+  cat -- "${pub}"
+  echo ""
+  echo "=== end public key ==="
+  echo ""
+}
+
+mysql_local_test_cnf() {
+  local db="$1" cnf="$2"
+  mysql --defaults-file="${cnf}" -e "USE \`${db}\`; SELECT 1" >/dev/null 2>&1
+}
+
+mysql_local_dump_cnf() {
+  local db="$1" cnf="$2" out="$3"
+  mysqldump --defaults-file="${cnf}" \
+    --single-transaction --routines --triggers --events --set-gtid-purged=OFF \
+    --databases "${db}" | gzip -c >"${out}"
+}
+
+remote_prepare_and_upload() {
+  local dump_basename="$1" local_path="$2"
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" \
+    "mkdir -p -- '${DUMP_DIR_REMOTE}' && rm -f '${DUMP_DIR_REMOTE}'/*" \
+    || die "could not prepare ${DUMP_DIR_REMOTE} on remote"
+
+  scp -i "${SSH_KEY}" -P "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${local_path}" "${REMOTE_USER}@${REMOTE_HOST}:${DUMP_DIR_REMOTE}/${dump_basename}" \
+    || die "scp failed"
+}
+
+remote_import_dump() {
+  local dump_basename="$1"
+  local inner
+  if [ -n "${REMOTE_MYSQL_CNF}" ]; then
+    inner="set -euo pipefail; f='${DUMP_DIR_REMOTE}/${dump_basename}'; [ -f \"\$f\" ] || exit 1; gzip -dc -- \"\$f\" | mysql --defaults-file=$(printf '%q' "${REMOTE_MYSQL_CNF}")"
+  else
+    inner="set -euo pipefail; f='${DUMP_DIR_REMOTE}/${dump_basename}'; [ -f \"\$f\" ] || exit 1; gzip -dc -- \"\$f\" | mysql"
+  fi
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" "${inner}" \
+    || return 1
+  return 0
+}
+
+remote_rm_dump() {
+  local dump_basename="$1"
+  ssh -i "${SSH_KEY}" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=accept-new \
+    -- "${REMOTE_USER}@${REMOTE_HOST}" \
+    "rm -f -- '${DUMP_DIR_REMOTE}/${dump_basename}'" 2>/dev/null || true
+}
+
+main() {
+  require_root
+
+  command -v ssh >/dev/null 2>&1 || die "ssh not found"
+  command -v scp >/dev/null 2>&1 || die "scp not found"
+  command -v mysql >/dev/null 2>&1 || die "mysql client not found"
+  command -v mysqldump >/dev/null 2>&1 || die "mysqldump not found"
+  command -v gzip >/dev/null 2>&1 || die "gzip not found"
+  command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen not found"
+
+  echo "=== staging / remote SSH (where the dump will be uploaded and imported) ==="
+  REMOTE_HOST="$(prompt_nonempty 'remote server host (hostname or IP): ')"
+  REMOTE_PORT="$(prompt_optional_default 'remote server SSH port' '22')"
+  REMOTE_USER="$(prompt_optional_default 'remote SSH username' 'root')"
+
+  echo "testing SSH to ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} ..."
+  if ! ssh_test; then
+    echo "SSH failed (no key or not authorized yet)."
+    ensure_remote_ssh_key
+    while true; do
+      read -r -p "Have you placed the public key on the remote server? [Y/n]: " ok || exit 1
+      ok="$(echo "${ok}" | tr '[:upper:]' '[:lower:]')"
+      if [ -z "${ok}" ] || [ "${ok}" = "y" ] || [ "${ok}" = "yes" ]; then
+        break
+      fi
+      echo "Place the key for user ${REMOTE_USER}, then press Enter (or y)."
+    done
+    if ! ssh_test; then
+      die "still cannot SSH to ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} — check key, user, port, firewall"
+    fi
+  fi
+  echo "SSH ok."
+
+  if [ -n "${REMOTE_MYSQL_CNF}" ]; then
+    ensure_remote_dump_conf "${REMOTE_MYSQL_CNF}"
+  fi
+
+  echo ""
+  ensure_local_dump_conf "${SOURCE_MYSQL_CNF}"
+
+  echo ""
+  echo "=== local MySQL (this server — data source) ==="
+  echo "using ${SOURCE_MYSQL_CNF} (--defaults-file) for local mysqldump"
+  DB_NAME="$(prompt_nonempty 'local database name to dump: ')"
+
+  while true; do
+    echo "validating local MySQL access ..."
+    if mysql_local_test_cnf "${DB_NAME}" "${SOURCE_MYSQL_CNF}"; then
+      echo "local MySQL ok."
+      break
+    fi
+    echo "cannot connect or cannot USE database (check ${SOURCE_MYSQL_CNF} and grants)."
+    echo "  1) Retry (new database name)"
+    echo "  2) Re-edit ${SOURCE_MYSQL_CNF} and retry"
+    echo "  3) Exit"
+    read -r -p "choose [1/2/3]: " pick || exit 1
+    case "${pick}" in
+      1) DB_NAME="$(prompt_nonempty 'local database name to dump: ')" ;;
+      2)
+        run_text_editor "${SOURCE_MYSQL_CNF}"
+        [ -s "${SOURCE_MYSQL_CNF}" ] || die "${SOURCE_MYSQL_CNF} empty"
+        ;;
+      3) exit 1 ;;
+      *) echo "invalid choice" ;;
+    esac
+  done
+
+  mkdir -p -- "${DUMP_DIR_LOCAL}"
+  DUMP_BASENAME="${DB_NAME}.sql.gz"
+  LOCAL_DUMP="${DUMP_DIR_LOCAL}/${DUMP_BASENAME}"
+
+  if [ -e "${LOCAL_DUMP}" ]; then
+    echo "removing existing ${LOCAL_DUMP}"
+    rm -f -- "${LOCAL_DUMP}"
+  fi
+
+  echo "creating dump ${LOCAL_DUMP} ..."
+  mysql_local_dump_cnf "${DB_NAME}" "${SOURCE_MYSQL_CNF}" "${LOCAL_DUMP}"
+  [ -s "${LOCAL_DUMP}" ] || die "dump file empty or missing"
+
+  if [ -n "${REMOTE_MYSQL_CNF}" ]; then
+    echo "remote import will use: mysql --defaults-file=${REMOTE_MYSQL_CNF}"
+  fi
+
+  echo "preparing remote ${DUMP_DIR_REMOTE} (clear + upload) ..."
+  remote_prepare_and_upload "${DUMP_BASENAME}" "${LOCAL_DUMP}"
+
+  echo "importing on remote via mysql ..."
+  if ! remote_import_dump "${DUMP_BASENAME}"; then
+    echo "error: import on remote failed — dump may still exist on remote at ${DUMP_DIR_REMOTE}/${DUMP_BASENAME}" >&2
+    remote_rm_dump "${DUMP_BASENAME}"
+    rm -f -- "${LOCAL_DUMP}"
+    die "database import failed on staging"
+  fi
+
+  echo "removing dump on remote ..."
+  remote_rm_dump "${DUMP_BASENAME}"
+
+  echo "removing dump on local ..."
+  rm -f -- "${LOCAL_DUMP}"
+
+  echo ""
+  echo "=== database successfully exported and imported on ${REMOTE_HOST} ==="
+}
+
+main "$@"
