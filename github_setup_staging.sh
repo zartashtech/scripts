@@ -38,9 +38,33 @@ ssh_strict_host_opt() {
   fi
 }
 
+# Print one authorized_keys line for a private key path (stderr). Returns 0 if a line was printed.
+sql_dump_print_pubkey_for_private_key() {
+  local ssh_key="$1"
+  local staging_cli="${2:-}"
+  local repo_root="${3:-${STAGING_TOOLING_REPO_DEFAULT}}"
+  local pub_line=""
+  [ -n "${ssh_key}" ] && [ -f "${ssh_key}" ] || return 1
+  if [ -f "${ssh_key}.pub" ]; then
+    pub_line="$(head -n 1 "${ssh_key}.pub")"
+  elif command -v ssh-keygen >/dev/null 2>&1; then
+    pub_line="$(ssh-keygen -y -f "${ssh_key}" 2>/dev/null)" || pub_line=""
+  fi
+  if [ -z "${pub_line}" ]; then
+    echo "Could not read public key for ${ssh_key} (.pub missing; ssh-keygen -y failed)." >&2
+    return 1
+  fi
+  echo "Private key used here: ${ssh_key}" >&2
+  echo "Add this **one line** on staging (paste into remote_ssh_connect_provision.sh, or ${staging_cli%%@*}'s ~/.ssh/authorized_keys on the staging host):" >&2
+  echo "${pub_line}" >&2
+  echo "" >&2
+  echo "On staging server, run: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
+  return 0
+}
+
 # After failed scp from staging: host-key help + print the public key for Permission denied (publickey).
 sql_dump_hint_after_scp_fail() {
-  local cli host ssh_key repo_root pub_line
+  local cli host ssh_key repo_root
   cli="${1:-}"
   ssh_key="${2:-}"
   repo_root="${3:-${STAGING_TOOLING_REPO_DEFAULT}}"
@@ -52,23 +76,50 @@ sql_dump_hint_after_scp_fail() {
   echo "  • Permission denied (publickey) → on staging, authorize this **public** key for ${cli%%@*} (see below)." >&2
   echo "" >&2
   if [ -n "${ssh_key}" ] && [ -f "${ssh_key}" ]; then
-    echo "Private key used here: ${ssh_key}" >&2
-    pub_line=""
-    if [ -f "${ssh_key}.pub" ]; then
-      pub_line="$(head -n 1 "${ssh_key}.pub")"
-    elif command -v ssh-keygen >/dev/null 2>&1; then
-      pub_line="$(ssh-keygen -y -f "${ssh_key}" 2>/dev/null)" || pub_line=""
-    fi
-    if [ -n "${pub_line}" ]; then
-      echo "Add this one line to staging (paste into remote_ssh_connect_provision.sh, or root ~/.ssh/authorized_keys):" >&2
-      echo "${pub_line}" >&2
-    else
-      echo "Could not read public key (${ssh_key}.pub missing; ssh-keygen -y failed)." >&2
-    fi
-    echo "" >&2
-    echo "On staging server, run: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
+    sql_dump_print_pubkey_for_private_key "${ssh_key}" "${cli}" "${repo_root}" \
+      || true
     echo "(Then re-run sql-dump-to-staging from this host.)" >&2
   fi
+}
+
+# When --ssh-key path is missing: keygen hint + show pubkey from an existing login-user key if any.
+sql_dump_hint_missing_ssh_key() {
+  local want="${1:-}"
+  local staging_cli="${2:-}"
+  local repo_root="${3:-${STAGING_TOOLING_REPO_DEFAULT}}"
+  local su="${SUDO_USER:-}"
+  local uh cand
+  echo "" >&2
+  if [ -n "${su}" ] && [ "${su}" != "root" ] && [ -d "/home/${su}" ]; then
+    uh="/home/${su}/.ssh"
+    echo "No private key at: ${want}" >&2
+    echo "Create one for dump uploads (no passphrase):" >&2
+    echo "  sudo -u ${su} mkdir -p \"${uh}\" && sudo -u ${su} ssh-keygen -t ed25519 -f \"${uh}/remote_ssh\" -N \"\"" >&2
+    echo "Then re-run with: --ssh-key ${uh}/remote_ssh" >&2
+    echo "" >&2
+    echo "If SSH to staging is not set up yet, add the matching **public** line on staging first — copy the line below:" >&2
+    echo "" >&2
+    for cand in "${uh}/remote_ssh" "${uh}/id_ed25519" "${uh}/id_rsa"; do
+      if [ -f "${cand}" ]; then
+        sql_dump_print_pubkey_for_private_key "${cand}" "${staging_cli}" "${repo_root}" && return 0
+      fi
+    done
+    if [ -f "${want}.pub" ]; then
+      echo "Found ${want}.pub but private key is missing — restore the private file or generate a new pair." >&2
+      echo "Public line (for staging authorized_keys):" >&2
+      head -n 1 "${want}.pub" >&2
+      echo "" >&2
+      echo "On staging: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
+      return 0
+    fi
+    echo "No existing key at ${uh}/remote_ssh, id_ed25519, or id_rsa — run the ssh-keygen line above, then:" >&2
+    echo "  cat ${uh}/remote_ssh.pub" >&2
+    echo "Paste that one line on staging, then re-run sql-dump-to-staging." >&2
+  else
+    echo "Create a key (e.g. ssh-keygen -t ed25519 -f ~/.ssh/remote_ssh -N \"\") and pass --ssh-key /full/path/to/private_key" >&2
+  fi
+  echo "" >&2
+  echo "On staging: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
 }
 
 # scp one file from staging → temp; run it with same argv tail; always remove temp (trap).
@@ -120,7 +171,8 @@ sql_dump_run_fetched_from_staging() {
   fi
   if [ ! -f "${SSH_KEY}" ]; then
     echo "Error: SSH private key not found: ${SSH_KEY}" >&2
-    echo "On staging, run scripts/remote_ssh_connect_provision.sh and authorize this host's public key." >&2
+    echo "If you used sudo, HOME is /root — pass your login user's key: --ssh-key /home/YOUR_USER/.ssh/remote_ssh" >&2
+    sql_dump_hint_missing_ssh_key "${SSH_KEY}" "${STAGING_SSH_CLI}" "${REPO_PATH}"
     exit 1
   fi
 
