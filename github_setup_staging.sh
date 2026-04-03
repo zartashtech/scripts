@@ -38,13 +38,37 @@ ssh_strict_host_opt() {
   fi
 }
 
-# accept-new still fails if known_hosts has a different key for this host (rebuilt VM, new sshd host key).
-sql_dump_hint_known_hosts() {
-  local cli="$1" host="${cli#*@}"
+# After failed scp from staging: host-key help + print the public key for Permission denied (publickey).
+sql_dump_hint_after_scp_fail() {
+  local cli host ssh_key repo_root pub_line
+  cli="${1:-}"
+  ssh_key="${2:-}"
+  repo_root="${3:-${STAGING_TOOLING_REPO_DEFAULT}}"
+  host="${cli#*@}"
   [ "${host}" = "${cli}" ] && host="${cli}"
   echo "" >&2
-  echo "Host key mismatch: staging was likely rebuilt or sshd keys were regenerated. On this machine (as root), drop the old entry, then re-run:" >&2
-  echo "  ssh-keygen -f /root/.ssh/known_hosts -R \"${host}\"" >&2
+  echo "scp/ssh from staging failed. Common fixes:" >&2
+  echo "  • REMOTE HOST IDENTIFICATION HAS CHANGED → as root here: ssh-keygen -f /root/.ssh/known_hosts -R \"${host}\"" >&2
+  echo "  • Permission denied (publickey) → on staging, authorize this **public** key for ${cli%%@*} (see below)." >&2
+  echo "" >&2
+  if [ -n "${ssh_key}" ] && [ -f "${ssh_key}" ]; then
+    echo "Private key used here: ${ssh_key}" >&2
+    pub_line=""
+    if [ -f "${ssh_key}.pub" ]; then
+      pub_line="$(head -n 1 "${ssh_key}.pub")"
+    elif command -v ssh-keygen >/dev/null 2>&1; then
+      pub_line="$(ssh-keygen -y -f "${ssh_key}" 2>/dev/null)" || pub_line=""
+    fi
+    if [ -n "${pub_line}" ]; then
+      echo "Add this one line to staging (paste into remote_ssh_connect_provision.sh, or root ~/.ssh/authorized_keys):" >&2
+      echo "${pub_line}" >&2
+    else
+      echo "Could not read public key (${ssh_key}.pub missing; ssh-keygen -y failed)." >&2
+    fi
+    echo "" >&2
+    echo "On staging server, run: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
+    echo "(Then re-run sql-dump-to-staging from this host.)" >&2
+  fi
 }
 
 # scp one file from staging → temp; run it with same argv tail; always remove temp (trap).
@@ -139,7 +163,7 @@ sql_dump_run_fetched_from_staging() {
     -o IdentitiesOnly=yes \
     -- "${STAGING_SSH_CLI}:${remote_full}" "${tmp}"; then
     echo "Error: scp failed for ${STAGING_SSH_CLI}:${remote_full}" >&2
-    sql_dump_hint_known_hosts "${STAGING_SSH_CLI}"
+    sql_dump_hint_after_scp_fail "${STAGING_SSH_CLI}" "${SSH_KEY}" "${REPO_PATH}"
     exit 1
   fi
 
