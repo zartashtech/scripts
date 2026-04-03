@@ -13,6 +13,9 @@
 # Optional env:
 #   DUMP_DIR_LOCAL   DUMP_DIR_REMOTE   SOURCE_MYSQL_CNF   REMOTE_MYSQL_CNF
 #   SSH_STRICT_HOST_KEYS=yes  → StrictHostKeyChecking=yes (fail if host key unknown; pre-populate known_hosts)
+#
+# After a successful run the compressed dump remains on the remote under DUMP_DIR_REMOTE (scp overwrites same basename).
+# Local copy is removed. Use db_provision.sh or manual cleanup on staging when done.
 
 set -euo pipefail
 set -o noclobber
@@ -225,7 +228,7 @@ ensure_remote_ssh_key() {
 production_confirm_host() {
   local again
   echo ""
-  echo ">>> PRODUCTION / DESTRUCTIVE REMOTE: this will overwrite ${DUMP_DIR_REMOTE} on ${REMOTE_HOST} and import into MySQL there."
+  echo ">>> PRODUCTION / REMOTE: MySQL on ${REMOTE_HOST} will be loaded from a dump file under ${DUMP_DIR_REMOTE} (other files in that dir left intact; same basename replaced on upload)."
   read -r -p "Type the staging hostname/IP again EXACTLY to confirm: " again || die "stdin closed"
   again="$(echo "${again}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ "${again}" = "${REMOTE_HOST}" ] || die "confirmation did not match host (${again} != ${REMOTE_HOST}) — aborting"
@@ -247,8 +250,8 @@ remote_prepare_and_upload() {
   local dump_basename="$1" local_path="$2"
   validate_dump_basename "${dump_basename}"
 
-  ssh_exec "mkdir -p -- $(printf '%q' "${DUMP_DIR_REMOTE}") && rm -f -- $(printf '%q' "${DUMP_DIR_REMOTE}")/*" \
-    || die "could not prepare ${DUMP_DIR_REMOTE} on remote"
+  ssh_exec "mkdir -p -- $(printf '%q' "${DUMP_DIR_REMOTE}")" \
+    || die "could not create ${DUMP_DIR_REMOTE} on remote"
 
   scp -i "${SSH_KEY}" -P "${REMOTE_PORT}" \
     -o ConnectTimeout=15 \
@@ -275,14 +278,6 @@ remote_import_dump() {
       || return 1
   fi
   return 0
-}
-
-remote_rm_dump() {
-  local dump_basename="$1"
-  validate_dump_basename "${dump_basename}"
-  local rf_q
-  rf_q="$(printf '%q' "${DUMP_DIR_REMOTE}/${dump_basename}")"
-  ssh_exec "rm -f -- ${rf_q}" 2>/dev/null || true
 }
 
 main() {
@@ -388,25 +383,22 @@ main() {
     echo "remote import will use: mysql --defaults-file=${REMOTE_MYSQL_CNF}"
   fi
 
-  echo "preparing remote ${DUMP_DIR_REMOTE} (clear + upload) ... — ALL FILES IN THAT DIRECTORY ON STAGING WILL BE REMOVED"
+  echo "uploading ${DUMP_BASENAME} to ${REMOTE_HOST}:${DUMP_DIR_REMOTE}/ (replaces existing file of same name; other files untouched) ..."
   remote_prepare_and_upload "${DUMP_BASENAME}" "${LOCAL_DUMP}"
 
   echo "importing on remote via mysql ..."
   if ! remote_import_dump "${DUMP_BASENAME}"; then
-    echo "error: import on remote failed — dump may still exist on remote at ${DUMP_DIR_REMOTE}/${DUMP_BASENAME}" >&2
-    remote_rm_dump "${DUMP_BASENAME}"
+    echo "error: import on remote failed — dump left on remote at ${DUMP_DIR_REMOTE}/${DUMP_BASENAME}" >&2
     rm -f -- "${LOCAL_DUMP}" 2>/dev/null || true
     die "database import failed on staging"
   fi
 
-  echo "removing dump on remote ..."
-  remote_rm_dump "${DUMP_BASENAME}"
-
-  echo "removing dump on local ..."
+  echo "removing dump on local only (staging copy kept at ${DUMP_DIR_REMOTE}/${DUMP_BASENAME}) ..."
   rm -f -- "${LOCAL_DUMP}"
 
   echo ""
   echo "=== database successfully exported and imported on ${REMOTE_HOST} ==="
+  echo "Remote archive kept for db_provision.sh or manual use: ${DUMP_DIR_REMOTE}/${DUMP_BASENAME}"
 }
 
 main "$@"
