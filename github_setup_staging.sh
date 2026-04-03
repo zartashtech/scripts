@@ -24,7 +24,7 @@
 #   sudo bash github_setup_staging.sh zartashtech staging_websites
 #
 # MySQL source host — fetch **scripts/db_scripts/inventory_sql_dump_to_staging.sh** from the staging tooling clone (scp), run it, delete temp copy:
-#   sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@staging.example.com [--repo-path /opt/deploy/staging_lamp_setup] [--ssh-key ~/.ssh/remote_ssh] [--ssh-port 22] [-- further args passed to the dump script ...]
+#   sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@staging.example.com [--remote-mysql-label tms] [--repo-path ...] [--ssh-key ...] [--ssh-port 22] [-- pass-through flags for the dump script ...]
 #
 # Public **scripts** repo should ship **only** this file; the dump script lives under scripts/db_scripts/ on staging (not published separately).
 
@@ -36,6 +36,15 @@ ssh_strict_host_opt() {
   else
     printf '%s' "StrictHostKeyChecking=accept-new"
   fi
+}
+
+# accept-new still fails if known_hosts has a different key for this host (rebuilt VM, new sshd host key).
+sql_dump_hint_known_hosts() {
+  local cli="$1" host="${cli#*@}"
+  [ "${host}" = "${cli}" ] && host="${cli}"
+  echo "" >&2
+  echo "Host key mismatch: staging was likely rebuilt or sshd keys were regenerated. On this machine (as root), drop the old entry, then re-run:" >&2
+  echo "  ssh-keygen -f /root/.ssh/known_hosts -R \"${host}\"" >&2
 }
 
 # scp one file from staging → temp; run it with same argv tail; always remove temp (trap).
@@ -130,6 +139,7 @@ sql_dump_run_fetched_from_staging() {
     -o IdentitiesOnly=yes \
     -- "${STAGING_SSH_CLI}:${remote_full}" "${tmp}"; then
     echo "Error: scp failed for ${STAGING_SSH_CLI}:${remote_full}" >&2
+    sql_dump_hint_known_hosts "${STAGING_SSH_CLI}"
     exit 1
   fi
 
@@ -171,7 +181,7 @@ if [ -z "${GITHUB_USER}" ] || [ -z "${REPO_NAME}" ]; then
   echo "  sudo bash github_setup_staging.sh zartashtech staging_websites"
   echo ""
   echo "MySQL source host — fetch dump helper from staging clone (temp file), run, delete:"
-  echo "  sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@STAGING [... pass-through flags for inventory_sql_dump_to_staging.sh ...]"
+  echo "  sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@STAGING [--remote-mysql-label NAME if several [remote_mysql:*]] [... other flags for inventory_sql_dump_to_staging.sh ...]"
   exit 1
 fi
 
