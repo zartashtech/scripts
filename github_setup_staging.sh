@@ -24,7 +24,11 @@
 #   sudo bash github_setup_staging.sh zartashtech staging_websites
 #
 # MySQL source host — fetch **scripts/db_scripts/inventory_sql_dump_to_staging.sh** from the staging tooling clone (scp), run it, delete temp copy:
-#   sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@staging.example.com [--remote-mysql-label tms] [--repo-path ...] [--ssh-key ...] [--ssh-port 22] [-- pass-through flags for the dump script ...]
+#   sudo bash github_setup_staging.sh sql-dump-to-staging \
+#     --repo-path /opt/deploy/staging_lamp_setup \   # omit if default on staging
+#     --ssh-key /home/LOGIN/.ssh/remote_ssh \        # omit for /home/$SUDO_USER/.ssh/remote_ssh
+#     --staging root@staging.example.com --yes --remote-mysql-label tms [--ssh-port 22] [...]
+#   With sudo, default --ssh-key is /home/$SUDO_USER/.ssh/remote_ssh (not /root/.ssh). Missing key: script creates ed25519 pair as that user. If SSH to staging fails, prints pubkey; interactive: press Enter to retry. CI/pipes: set GITHUB_SETUP_STAGING_NON_INTERACTIVE=1 to exit instead of prompting.
 #
 # Public **scripts** repo should ship **only** this file; the dump script lives under scripts/db_scripts/ on staging (not published separately).
 
@@ -122,6 +126,99 @@ sql_dump_hint_missing_ssh_key() {
   echo "On staging: sudo bash ${repo_root}/scripts/remote_ssh_connect_provision.sh" >&2
 }
 
+sql_dump_non_interactive() {
+  [ -n "${GITHUB_SETUP_STAGING_NON_INTERACTIVE:-}" ] && return 0
+  [ ! -t 0 ] && return 0
+  return 1
+}
+
+# Owner for mkdir/ssh-keygen: /home/USER/.ssh/KEY → USER; /root/.ssh → root; else existing .ssh dir owner (stat).
+sql_dump_key_owner_for_path() {
+  local key_path="$1"
+  local d
+  d="$(dirname -- "${key_path}")"
+  case "${d}" in
+    /root/.ssh)
+      echo "root"
+      return 0
+      ;;
+    /home/*/.ssh)
+      local u="${d#/home/}"
+      u="${u%/.ssh}"
+      if id "${u}" >/dev/null 2>&1; then
+        echo "${u}"
+        return 0
+      fi
+      ;;
+  esac
+  if [ -d "${d}" ]; then
+    local o
+    o="$(stat -c '%U' "${d}" 2>/dev/null || true)"
+    if [ -n "${o}" ] && [ "${o}" != "UNKNOWN" ] && id "${o}" >/dev/null 2>&1; then
+      echo "${o}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Create SSH_KEY if missing (as owning user); loop until ssh to staging succeeds or non-interactive exit.
+sql_dump_ensure_ssh_key_and_staging_access() {
+  local sp="$1"
+  local staging_cli="$2"
+  local repo_root="$3"
+  local owner
+  local ssh_dir
+  local host
+  host="${staging_cli#*@}"
+  [ "${host}" = "${staging_cli}" ] && host="${staging_cli}"
+  ssh_dir="$(dirname -- "${SSH_KEY}")"
+
+  if [ ! -f "${SSH_KEY}" ]; then
+    owner="$(sql_dump_key_owner_for_path "${SSH_KEY}")" || {
+      echo "Error: cannot infer Linux user to own ${SSH_KEY} — use /home/LOGIN/.ssh/remote_ssh or /root/.ssh/remote_ssh (or pass --ssh-key with such a path)." >&2
+      sql_dump_hint_missing_ssh_key "${SSH_KEY}" "${staging_cli}" "${repo_root}"
+      exit 1
+    }
+    echo "=== [sql-dump-to-staging] No key at ${SSH_KEY} — creating ed25519 key (user ${owner}) ===" >&2
+    if [ "${owner}" = "root" ]; then
+      mkdir -p "${ssh_dir}"
+      chmod 700 "${ssh_dir}"
+      ssh-keygen -t ed25519 -f "${SSH_KEY}" -N "" -q
+      chmod 600 "${SSH_KEY}"
+    else
+      sudo -u "${owner}" mkdir -p "${ssh_dir}"
+      sudo -u "${owner}" chmod 700 "${ssh_dir}"
+      sudo -u "${owner}" ssh-keygen -t ed25519 -f "${SSH_KEY}" -N "" -q
+      chmod 600 "${SSH_KEY}" 2>/dev/null || true
+    fi
+  fi
+
+  if [ ! -f "${SSH_KEY}" ]; then
+    echo "Error: SSH private key still missing: ${SSH_KEY}" >&2
+    exit 1
+  fi
+
+  while true; do
+    if ssh -i "${SSH_KEY}" -P "${sp}" \
+      -o BatchMode=yes -o ConnectTimeout=30 -o "$(ssh_strict_host_opt)" \
+      -o IdentitiesOnly=yes \
+      -- "${staging_cli}" true >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "" >&2
+    echo "=== [sql-dump-to-staging] SSH to ${staging_cli} failed (authorize key on staging, fix host key, or network) ===" >&2
+    echo "  • Host key changed → as root here: ssh-keygen -f /root/.ssh/known_hosts -R \"${host}\"" >&2
+    sql_dump_print_pubkey_for_private_key "${SSH_KEY}" "${staging_cli}" "${repo_root}" || true
+    if sql_dump_non_interactive; then
+      echo "Non-interactive session: set GITHUB_SETUP_STAGING_NON_INTERACTIVE= (unset) for Enter-to-retry, or fix SSH and re-run." >&2
+      exit 1
+    fi
+    echo "After the key is authorized on staging, press Enter to retry (Ctrl+C to abort)..." >&2
+    read -r _ || exit 1
+  done
+}
+
 # scp one file from staging → temp; run it with same argv tail; always remove temp (trap).
 sql_dump_run_fetched_from_staging() {
   set -euo pipefail
@@ -130,7 +227,8 @@ sql_dump_run_fetched_from_staging() {
   local all_pass=("$@")
 
   local REPO_PATH="${REPO_PATH:-${STAGING_TOOLING_REPO_DEFAULT}}"
-  local SSH_KEY="${SSH_KEY:-${HOME}/.ssh/remote_ssh}"
+  local SSH_KEY=""
+  local SSH_KEY_FROM_ARG=""
   local STAGING_SSH_CLI=""
   local SSH_PORT_OVERRIDE=""
   local i=0
@@ -143,7 +241,8 @@ sql_dump_run_fetched_from_staging() {
         continue
         ;;
       --ssh-key)
-        SSH_KEY="${all_pass[i + 1]:-}"
+        SSH_KEY_FROM_ARG="${all_pass[i + 1]:-}"
+        SSH_KEY="${SSH_KEY_FROM_ARG}"
         i=$((i + 2))
         continue
         ;;
@@ -169,10 +268,24 @@ sql_dump_run_fetched_from_staging() {
     echo "Error: --staging USER@HOST is required (staging server that has the tooling repo clone)." >&2
     exit 1
   fi
-  if [ ! -f "${SSH_KEY}" ]; then
-    echo "Error: SSH private key not found: ${SSH_KEY}" >&2
-    echo "If you used sudo, HOME is /root — pass your login user's key: --ssh-key /home/YOUR_USER/.ssh/remote_ssh" >&2
-    sql_dump_hint_missing_ssh_key "${SSH_KEY}" "${STAGING_SSH_CLI}" "${REPO_PATH}"
+
+  # Default key: with sudo, use login user's ~/.ssh/remote_ssh (not /root/.ssh/remote_ssh).
+  if [ -z "${SSH_KEY_FROM_ARG}" ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+      SSH_KEY="/home/${SUDO_USER}/.ssh/remote_ssh"
+    else
+      SSH_KEY="${HOME}/.ssh/remote_ssh"
+    fi
+  fi
+
+  case "${SSH_KEY}" in
+    *..*)
+      echo "Error: unsafe .. in SSH key path: ${SSH_KEY}" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "${SSH_KEY}" != /* ]]; then
+    echo "Error: --ssh-key must be an absolute path (got: ${SSH_KEY})" >&2
     exit 1
   fi
 
@@ -196,10 +309,12 @@ sql_dump_run_fetched_from_staging() {
       ;;
   esac
 
-  if ! command -v scp >/dev/null 2>&1; then
+  if ! command -v ssh >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
     apt-get update -qq
     apt-get install -y --no-install-recommends openssh-client
   fi
+
+  sql_dump_ensure_ssh_key_and_staging_access "${sp}" "${STAGING_SSH_CLI}" "${REPO_PATH}"
 
   local tmp
   tmp="$(mktemp)"
@@ -218,6 +333,9 @@ sql_dump_run_fetched_from_staging() {
     sql_dump_hint_after_scp_fail "${STAGING_SSH_CLI}" "${SSH_KEY}" "${REPO_PATH}"
     exit 1
   fi
+
+  # Inner script defaults SSH_KEY to $HOME/.ssh/remote_ssh (root → wrong path). Pass resolved key via env.
+  export SSH_KEY
 
   local ec=0
   bash "${tmp}" "${all_pass[@]}" || ec=$?
@@ -256,8 +374,12 @@ if [ -z "${GITHUB_USER}" ] || [ -z "${REPO_NAME}" ]; then
   echo "  sudo bash github_setup_staging.sh zartashtech staging_lamp_setup"
   echo "  sudo bash github_setup_staging.sh zartashtech staging_websites"
   echo ""
-  echo "MySQL source host — fetch dump helper from staging clone (temp file), run, delete:"
-  echo "  sudo bash github_setup_staging.sh sql-dump-to-staging --staging root@STAGING [--remote-mysql-label NAME if several [remote_mysql:*]] [... other flags for inventory_sql_dump_to_staging.sh ...]"
+  echo "MySQL source host — fetch dump helper from staging (temp), run, delete:"
+  echo "  sudo bash github_setup_staging.sh sql-dump-to-staging \\"
+  echo "    --repo-path /opt/deploy/staging_lamp_setup \\"
+  echo "    --ssh-key /home/LOGIN/.ssh/remote_ssh \\"
+  echo "    --staging root@STAGING --yes --remote-mysql-label NAME"
+  echo "  (Drop --repo-path / --ssh-key when defaults apply. Creates key if missing; Enter-to-retry SSH. CI: GITHUB_SETUP_STAGING_NON_INTERACTIVE=1.)"
   exit 1
 fi
 
