@@ -29,6 +29,7 @@
 #     --ssh-key /home/LOGIN/.ssh/remote_ssh \        # omit for /home/$SUDO_USER/.ssh/remote_ssh
 #     --staging root@staging.example.com --yes --remote-mysql-label tms [--ssh-port 22] [...]
 #   With sudo, default --ssh-key is /home/$SUDO_USER/.ssh/remote_ssh (not /root/.ssh). Missing key: script creates ed25519 pair as that user. If SSH to staging fails, prints pubkey; interactive: press Enter to retry. CI/pipes: set GITHUB_SETUP_STAGING_NON_INTERACTIVE=1 to exit instead of prompting.
+#   TMS-style: key is often under /home/nonroot/.ssh/remote_ssh; the .pub comment (e.g. nonroot@vmi…) is the **local** identity only — staging still uses root@HOST and only needs that one pubkey line in root's authorized_keys.
 #
 # Public **scripts** repo should ship **only** this file; the dump script lives under scripts/db_scripts/ on staging (not published separately).
 
@@ -59,6 +60,7 @@ sql_dump_print_pubkey_for_private_key() {
     return 1
   fi
   echo "Private key used here: ${ssh_key}" >&2
+  echo "(Key may be owned by a non-root user, e.g. nonroot; pubkey comment does not need to match the remote login name.)" >&2
   echo "Add this **one line** on staging (paste into remote_ssh_connect_provision.sh, or ${staging_cli%%@*}'s ~/.ssh/authorized_keys on the staging host):" >&2
   echo "${pub_line}" >&2
   echo "" >&2
@@ -200,7 +202,8 @@ sql_dump_ensure_ssh_key_and_staging_access() {
   fi
 
   while true; do
-    if ssh -i "${SSH_KEY}" -P "${sp}" \
+    # ssh uses -p for port; scp uses -P (do not mix them up).
+    if ssh -i "${SSH_KEY}" -p "${sp}" \
       -o BatchMode=yes -o ConnectTimeout=30 -o "$(ssh_strict_host_opt)" \
       -o IdentitiesOnly=yes \
       -- "${staging_cli}" true >/dev/null 2>&1; then
