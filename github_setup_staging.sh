@@ -337,8 +337,12 @@ sql_dump_run_fetched_from_staging() {
   # Inner script defaults SSH_KEY to $HOME/.ssh/remote_ssh (root → wrong path). Pass resolved key via env.
   export SSH_KEY
 
+  echo "=== [bootstrap] Running fetched script on this host (mysqldump → staging); next lines are from inventory_sql_dump_to_staging.sh ===" >&2
   local ec=0
   bash "${tmp}" "${all_pass[@]}" || ec=$?
+  if [ "${ec}" -ne 0 ]; then
+    echo "=== [bootstrap] Dump script exited with code ${ec} (see errors above) ===" >&2
+  fi
   cleanup_tmp
   trap - EXIT
   exit "${ec}"
