@@ -2,95 +2,142 @@
 set -euo pipefail
 
 # ============================================================
-# OpenReplay Fresh Install on Ubuntu 24 + K3s
-# Verified flow:
-# - Install K3s without Traefik
-# - Install OpenReplay using official openreplay-cli
-# - Confirm LoadBalancer external IP
-# - Install SSL using certmanager.sh
+# OpenReplay Fresh Install (Ubuntu 24 + K3s)
 #
 # Usage:
-#   chmod +x openreplay_fresh_install.sh
-#   sudo ./openreplay_fresh_install.sh replay.ticketlords.co.uk seyalamjad@gmail.com 178.18.249.71
+# chmod +x openreplay_fresh_install.sh
+# ./openreplay_fresh_install.sh replay.ticketlords.co.uk seyalamjad@gmail.com 178.18.249.71
+#
+# VERIFIED:
+# Ubuntu 24.04
+# K3s
+# OpenReplay v1.27.x
+# Single Node
 # ============================================================
 
-DOMAIN="${1:-replay.ticketlords.co.uk}"
-EMAIL="${2:-seyalamjad@gmail.com}"
-PUBLIC_IP="${3:-178.18.249.71}"
+DOMAIN="${1:-}"
+EMAIL="${2:-}"
+PUBLIC_IP="${3:-}"
 
-echo "[INFO] Domain: $DOMAIN"
-echo "[INFO] Email: $EMAIL"
-echo "[INFO] Public IP: $PUBLIC_IP"
+if [ -z "$DOMAIN" ]; then
+    echo "Usage:"
+    echo "./openreplay_fresh_install.sh domain email public_ip"
+    exit 1
+fi
 
-echo "[1/10] System update and packages"
-apt update && apt upgrade -y
-apt install -y curl wget git ufw dnsutils openssl ca-certificates
+echo "=================================================="
+echo "Domain    : $DOMAIN"
+echo "Email     : $EMAIL"
+echo "Public IP : $PUBLIC_IP"
+echo "=================================================="
 
-echo "[2/10] Firewall"
+echo "[1/8] Updating server"
+apt update
+apt upgrade -y
+
+echo "[2/8] Installing required packages"
+apt install -y \
+curl \
+wget \
+git \
+ufw \
+dnsutils \
+openssl \
+ca-certificates
+
+echo "[3/8] Configuring firewall"
+
 ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
-ufw status
 
-echo "[3/10] Install K3s without Traefik"
-curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" INSTALL_K3S_EXEC="--disable=traefik" sh -
+echo "[4/8] Installing K3s (Traefik disabled)"
+
+curl -sfL https://get.k3s.io | \
+K3S_KUBECONFIG_MODE="644" \
+INSTALL_K3S_EXEC="--disable=traefik" \
+sh -
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-echo "[4/10] Confirm Kubernetes"
+echo "[5/8] Waiting for Kubernetes"
+
+sleep 20
+
 kubectl get nodes
 kubectl get pods -A
 
-echo "[5/10] Install OpenReplay CLI"
-wget https://raw.githubusercontent.com/openreplay/openreplay/main/scripts/helmcharts/openreplay-cli -O /bin/openreplay
-chmod +x /bin/openreplay
+echo "[6/8] Installing OpenReplay CLI"
 
-echo "[6/10] Clean any old OpenReplay directory/state"
+wget -q \
+https://raw.githubusercontent.com/openreplay/openreplay/main/scripts/helmcharts/openreplay-cli \
+-O /usr/local/bin/openreplay
+
+chmod +x /usr/local/bin/openreplay
+
+echo "[7/8] Cleaning old OpenReplay installation"
+
 rm -rf /var/lib/openreplay
 
-echo "[7/10] Install OpenReplay"
+echo "[8/8] Installing OpenReplay"
+
 openreplay -i "$DOMAIN"
 
-echo "[8/10] Verify OpenReplay pods/services/ingress"
+echo
+echo "=================================================="
+echo "OpenReplay Installation Finished"
+echo "=================================================="
+
+echo
+echo "Checking Pods..."
 kubectl get pods -A
-kubectl get svc -A | grep -E "openreplay|ingress|nginx" || true
-kubectl get ingress -A || true
-
-echo "[9/10] Ensure LoadBalancer has public IP"
-if ! kubectl get svc -n app openreplay-ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null | grep -q .; then
-  echo "[WARN] LoadBalancer IP not found. Patching externalIPs with $PUBLIC_IP"
-  kubectl patch svc -n app openreplay-ingress-nginx-controller \
-    -p "{\"spec\":{\"externalIPs\":[\"$PUBLIC_IP\"]}}"
-  kubectl rollout restart deployment -n app openreplay-ingress-nginx-controller
-  kubectl rollout status deployment -n app openreplay-ingress-nginx-controller
-fi
-
-echo "[10/10] DNS check"
-echo "DNS result:"
-dig +short "$DOMAIN" || true
-echo "Server public IP:"
-curl -4 ifconfig.me || true
-echo
-
-echo "[INFO] Test HTTP before SSL"
-curl -I "http://$DOMAIN" || true
 
 echo
-echo "============================================================"
-echo "NEXT: SSL installation is interactive."
-echo "Run this command and enter:"
+echo "Checking Services..."
+kubectl get svc -A
+
+echo
+echo "Checking Ingress..."
+kubectl get ingress -A
+
+echo
+echo "Checking Ingress Controller..."
+
+kubectl get svc -n app openreplay-ingress-nginx-controller || true
+
+echo
+echo "Checking DNS..."
+
+DNS_IP=$(dig +short "$DOMAIN" | tail -1 || true)
+
+echo "DNS IP    : $DNS_IP"
+echo "Server IP : $PUBLIC_IP"
+
+echo
+echo "=================================================="
+echo "NEXT STEP: SSL"
+echo "=================================================="
+
+echo
+echo "Run:"
+echo
+echo "cd /var/lib/openreplay/openreplay/scripts/helmcharts"
+echo "bash certmanager.sh"
+echo
+echo "Enter:"
 echo "Domain: $DOMAIN"
-echo "Email:  $EMAIL"
-echo "============================================================"
+echo "Email : $EMAIL"
 echo
-echo "cd /var/lib/openreplay/openreplay/scripts/helmcharts && bash certmanager.sh"
+echo "Then verify:"
 echo
-echo "After SSL script finishes, run:"
-echo "sleep 90"
-echo "kubectl get certificate,order,challenge -n app"
+echo "kubectl get certificate -n app"
+echo
+echo "Expected:"
+echo "openreplay-ssl   True"
+echo
+echo "Finally:"
+echo
 echo "curl -Ik https://$DOMAIN"
 echo
-echo "Expected certificate:"
-echo "openreplay-ssl   True"
-echo "============================================================"
+echo "=================================================="
